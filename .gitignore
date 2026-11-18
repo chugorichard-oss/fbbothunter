@@ -1,0 +1,16 @@
+# Entorno virtual y caché de Python
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+
+# Credenciales y sesión activa de Facebook (NUNCA subir a GitHub)
+src/auth_state.json
+*auth_state.json
+
+# Volúmenes locales de bases de datos y archivos temporales
+data/
+*.tar
+*.log
+*.csv
