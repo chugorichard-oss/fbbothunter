@@ -1,9 +1,14 @@
-import asyncio
+import os
+import subprocess
+import sys
+import warnings
 import pandas as pd
 import plotly.express as px
 import psycopg2
 import streamlit as st
-from bot_hunter_engine import run_analysis, DB_CONFIG
+from bot_hunter_engine import DB_CONFIG
+
+warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
 st.set_page_config(
     page_title="Bot Hunter Bolivia | Auditoría de Redes",
@@ -11,7 +16,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilos personalizados (Negro y Amarillo/Dorado)
 st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: #f5f5f5; }
@@ -21,6 +25,19 @@ st.markdown("""
         padding: 15px;
         border-radius: 6px;
     }
+    .terminal-box {
+        background-color: #090c10;
+        color: #39ff14;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 13px;
+        padding: 14px;
+        border-radius: 8px;
+        border: 1px solid #30363d;
+        height: 300px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        line-height: 1.45;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -28,29 +45,58 @@ def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 st.title("🛡️ Bot Hunter Bolivia — Detector de Granjas Coordinadas")
-st.caption("Auditoría de inautenticidad, perfiles cascarón y consignas repetitivas en Facebook.")
+st.caption("Auditoría de inautenticidad, cuentas sin historial y consignas repetitivas en Facebook.")
 
-# --- BARRA LATERAL: NUEVO ANÁLISIS ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.header("🔎 Nueva Auditoría")
     nueva_url = st.text_input("URL de la publicación de Facebook", placeholder="https://www.facebook.com/...")
     max_perfiles = st.slider("Perfiles a inspeccionar a fondo", min_value=10, max_value=150, value=60, step=10)
-    
-    if st.button("🚀 Analizar Publicación", use_container_width=True, type="primary"):
-        if nueva_url.strip():
-            with st.spinner("Extrayendo comentarios e inspeccionando perfiles en segundo plano..."):
-                asyncio.run(run_analysis(nueva_url.strip(), max_comments=250, max_profile_visits=max_perfiles))
-            st.success("¡Auditoría completada!")
-            st.rerun()
-        else:
-            st.warning("Ingresa una URL válida primero.")
+    ejecutar_btn = st.button("🚀 Analizar Publicación", width="stretch", type="primary")
 
     st.divider()
     st.markdown("**Criterios de Detección Activos:**")
     st.markdown("- 🌐 Alfabetos extranjeros (+50%)")
+    st.markdown("- 📢 Consigna coordinada / clonada (+40%)")
     st.markdown("- 👥 Red < 30 amigos (+35%)")
     st.markdown("- 🔒 Perfil cerrado / sin posts (+20%)")
-    st.markdown("- 🔁 Consigna >= 72% similar (+30%)")
+
+# --- TERMINAL EN VIVO EN TIEMPO REAL ---
+if ejecutar_btn:
+    if nueva_url.strip():
+        st.subheader("🖥️ Terminal del Worker en Vivo")
+        terminal_placeholder = st.empty()
+        logs_acumulados = ["[SYSTEM] Lanzando subproceso Playwright headless..."]
+        terminal_placeholder.markdown(
+            f'<div class="terminal-box">{"<br>".join(logs_acumulados)}</div>',
+            unsafe_allow_html=True
+        )
+
+        script_path = os.path.join(os.path.dirname(__file__), "bot_hunter_engine.py")
+        proceso = subprocess.Popen(
+            [sys.executable, "-u", script_path, nueva_url.strip(), str(max_perfiles)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        for linea in iter(proceso.stdout.readline, ""):
+            if linea:
+                logs_acumulados.append(linea.rstrip())
+                visibles = logs_acumulados[-35:]
+                terminal_placeholder.markdown(
+                    f'<div class="terminal-box">{"<br>".join(visibles)}</div>',
+                    unsafe_allow_html=True
+                )
+
+        proceso.stdout.close()
+        proceso.wait()
+        st.success("✅ Auditoría completada. Pulsa el botón inferior para cargar los gráficos actualizados.")
+        if st.button("🔄 Ver Gráficos y Resultados Actualizados"):
+            st.rerun()
+    else:
+        st.warning("Ingresa una URL válida en el panel izquierdo.")
 
 # --- CARGA DE DATOS DESDE POSTGRESQL ---
 conn = get_connection()
@@ -61,7 +107,6 @@ if df_posts.empty:
     conn.close()
     st.stop()
 
-# Selector de publicación auditada
 opciones_posts = {f"{row['fb_post_id']} ({str(row['creado_en'])[:16]}) — {row['url'][:55]}...": row['id'] for _, row in df_posts.iterrows()}
 seleccion = st.selectbox("📂 Selecciona una publicación auditada:", list(opciones_posts.keys()))
 post_id_seleccionado = opciones_posts[seleccion]
@@ -87,15 +132,20 @@ conn.close()
 
 # --- MÉTRICAS PRINCIPALES ---
 total_analizados = len(df)
-total_bots = int(df["Sospechoso"].sum())
+total_bots = int(df["Sospechoso"].sum()) if total_analizados > 0 else 0
 total_organicos = total_analizados - total_bots
-pct_manipulacion = round((total_bots / total_analizados) * 100, 1) if total_analizados else 0
+pct_manipulacion = round((total_bots / total_analizados) * 100, 1) if total_analizados > 0 else 0.0
+score_promedio = round(df["Bot Score"].mean(), 1) if total_analizados > 0 else 0.0
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Perfiles Analizados", total_analizados)
 col2.metric("Cuentas Sospechosas (Granja)", total_bots, delta=f"{pct_manipulacion}% del total", delta_color="inverse")
 col3.metric("Perfiles Orgánicos", total_organicos)
-col4.metric("Score Promedio de Riesgo", f"{round(df['Bot Score'].mean(), 1)}%")
+col4.metric("Score Promedio de Riesgo", f"{score_promedio}%")
+
+if total_analizados == 0:
+    st.warning("⚠️ Esta publicación no tiene comentarios extraídos.")
+    st.stop()
 
 st.divider()
 
@@ -111,7 +161,7 @@ with g_col1:
         hole=0.45
     )
     fig_pie.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f5f5f5")
-    st.plotly_chart(fig_pie, use_container_width=True)
+    st.plotly_chart(fig_pie, width="stretch")
 
 with g_col2:
     st.subheader("Distribución de Puntajes (Bot Score)")
@@ -123,9 +173,9 @@ with g_col2:
         color_discrete_map={True: "#facc15", False: "#2ea043"}
     )
     fig_hist.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font_color="#f5f5f5")
-    st.plotly_chart(fig_hist, use_container_width=True)
+    st.plotly_chart(fig_hist, width="stretch")
 
-# --- TABLA DE EVIDENCIA Y EXPORTACIÓN ---
+# --- TABLA DE EVIDENCIA ---
 st.subheader("📋 Registro Detallado de Perfiles y Comentarios")
 
 filtro_solo_bots = st.checkbox("Mostrar únicamente cuentas sospechosas (Bot Score >= 35%)", value=True)
@@ -133,7 +183,7 @@ df_mostrar = df[df["Sospechoso"] == True] if filtro_solo_bots else df
 
 st.dataframe(
     df_mostrar,
-    use_container_width=True,
+    width="stretch",
     column_config={
         "Enlace Perfil": st.column_config.LinkColumn("Perfil FB"),
         "Bot Score": st.column_config.ProgressColumn("Bot Score", min_value=0, max_value=100, format="%d%%")
